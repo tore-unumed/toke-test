@@ -1,0 +1,80 @@
+name: Multi-Repo Issue Solver
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Triggers
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. An issue is labeled with  "agent"
+# 2. A maintainer posts a comment that starts with  /solve
+# ──────────────────────────────────────────────────────────────────────────────
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write       # post comments, manage labels
+  contents: read      # checkout this repo / read agent.md
+
+jobs:
+  solve-issue:
+    name: Solve Issue in Side Repos
+    runs-on: ubuntu-latest
+
+    # ── Conditions ─────────────────────────────────────────────────────────────
+    if: |
+      (github.event_name == 'issues' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'agent') ||
+      (github.event_name == 'issue_comment' &&
+       startsWith(github.event.comment.body, '/solve') &&
+       github.event.issue.pull_request == null)
+
+    steps:
+      # ── 1. Checkout this repo (for agent.md and the script) ─────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Python environment ────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install --quiet PyGithub requests
+
+      # ── 3. Global git identity (used when committing in cloned side-repos) ──
+      - name: Configure git
+        run: |
+          git config --global user.name  "Issue Solver Agent"
+          git config --global user.email "agent@github-actions.com"
+
+      # ── 4. Resolve the issue number regardless of trigger type ───────────────
+      - name: Resolve issue number
+        id: issue
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 5. Run the agent ─────────────────────────────────────────────────────
+      - name: Run issue solving agent
+        env:
+          # AGENT_TOKEN must be a PAT / GitHub App token that has *write* access
+          # to the side repos.  Fall back to the built-in token (read-only for
+          # external repos) so the workflow doesn't fail on missing secret.
+          GITHUB_TOKEN: ${{ secrets.AGENT_TOKEN || secrets.GITHUB_TOKEN }}
+          ORG_NAME:     ${{ github.repository_owner }}
+          REPO_NAME:    ${{ github.repository }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          # Optional: full "owner/repo" of a documentation repository that the
+          # agent will read for context (e.g. "tore-unumed/docs").
+          DOCS_REPO:    ${{ vars.DOCS_REPO || '' }}
+          # Optional: GitHub Models / OpenAI-compatible endpoint override.
+          AI_ENDPOINT:  ${{ vars.AI_ENDPOINT || 'https://models.inference.ai.azure.com' }}
+          # Optional: model name override (default: gpt-4o).
+          AI_MODEL:     ${{ vars.AI_MODEL || 'gpt-4o' }}
+        run: python .github/scripts/issue_agent.py
